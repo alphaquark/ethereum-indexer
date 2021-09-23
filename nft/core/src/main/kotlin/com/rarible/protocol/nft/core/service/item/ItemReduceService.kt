@@ -6,6 +6,7 @@ import com.rarible.core.logging.LoggingUtils
 import com.rarible.ethereum.domain.EthUInt256
 import com.rarible.ethereum.listener.log.domain.LogEvent
 import com.rarible.ethereum.listener.log.domain.LogEventStatus
+import com.rarible.protocol.nft.core.misc.eventId
 import com.rarible.protocol.nft.core.model.*
 import com.rarible.protocol.nft.core.repository.history.LazyNftItemHistoryRepository
 import com.rarible.protocol.nft.core.repository.history.NftItemHistoryRepository
@@ -22,6 +23,7 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.kotlin.core.publisher.toFlux
 import scalether.domain.Address
+import java.util.*
 
 @Service
 class ItemReduceService(
@@ -96,7 +98,7 @@ class ItemReduceService(
 
     private fun updateOneItem(marker: Marker, initial: Item, byItem: Flux<HistoryLog>): Mono<Void> =
         byItem
-            .reduce(initial, emptyMap(), this::itemReducer, this::ownershipsReducer)
+            .reduce(ReduceContext.init(marker), initial, emptyMap(), this::itemReducer, this::ownershipsReducer)
             .flatMap { royalty(it) }
             .flatMap { (item, ownerships) ->
                 if (item.token != Address.ZERO()) {
@@ -333,9 +335,40 @@ class ItemReduceService(
 
         val logger: Logger = LoggerFactory.getLogger(ItemReduceService::class.java)
 
-        private fun <T, A1, A2> Flux<T>.reduce(a1: A1, a2: A2, reducer1: (A1, T) -> A1, reducer2: (A2, T) -> A2): Mono<Pair<A1, A2>> =
-            reduce(Pair(a1, a2)) { (ac1, ac2), t ->
-                Pair(reducer1(ac1, t), reducer2(ac2, t))
+        private fun Flux<HistoryLog>.reduce(
+            context: ReduceContext,
+            item: Item,
+            ownership: Ownership,
+            itemReducer: (Item, HistoryLog) -> Item,
+            ownershipReducer: (Ownership, HistoryLog) -> Ownership
+        ): Mono<ReduceData> =
+            reduce(ReduceData(context, item, ownership)) { (context, item, ownership), historyLog ->
+                ReduceData(
+                    context = context.withHistoryLog(historyLog),
+                    item = itemReducer(item, historyLog),
+                    ownership = ownershipReducer(ownership, historyLog)
+                )
             }
+
+        private data class ReduceData(
+            val context: ReduceContext,
+            val item: Item,
+            val ownerships: List<Ownership>
+        )
+
+        private data class ReduceContext(
+            val marker: Marker,
+            val lastEventId: String
+        ) {
+            fun withHistoryLog(log: HistoryLog): ReduceContext {
+                return copy(lastEventId =  log.log.eventId)
+            }
+
+            companion object {
+                fun init(marker: Marker): ReduceContext {
+                    return ReduceContext(marker, UUID.randomUUID().toString())
+                }
+            }
+        }
     }
 }

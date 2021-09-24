@@ -100,7 +100,7 @@ class ItemReduceService(
         byItem
             .reduce(ReduceContext.init(marker), initial, emptyMap(), this::itemReducer, this::ownershipsReducer)
             .flatMap { royalty(it) }
-            .flatMap { (item, ownerships) ->
+            .flatMap { (context, item, ownerships) ->
                 if (item.token != Address.ZERO()) {
                     val fixed = fixOwnerships(ownerships.values)
                     val supply = fixed.map { it.value }.fold(EthUInt256.of(0), EthUInt256::plus)
@@ -110,10 +110,10 @@ class ItemReduceService(
                     updateItem(item.copy(supply = supply, lazySupply = lazySupply, deleted = deleted))
                         .flatMap { updatedItem ->
                             fixed.toFlux()
-                                .flatMap { updateOwnershipAndSave(marker, updatedItem, it) }
+                                .flatMap { updateOwnershipAndSave(context, updatedItem, it) }
                                 .collectList()
                                 .flatMap { updated ->
-                                    saveItem(marker, updatedItem, updated)
+                                    saveItem(context, updatedItem, updated)
                                 }
                                 .then()
                         }
@@ -122,13 +122,13 @@ class ItemReduceService(
                 }
             }
 
-    private fun royalty(pair: Pair<Item, Map<Address, Ownership>>): Mono<Pair<Item, Map<Address, Ownership>>> = mono {
-        val item = pair.first
+    private fun royalty(reduceData: ReduceData): Mono<ReduceData> = mono {
+        val item = reduceData.item
         if (item.royalties.isEmpty()) {
             val royalty = royaltyService.getRoyalty(item.token, item.tokenId)
-            Pair(item.copy(royalties = royalty), pair.second)
+            reduceData.copy(item = item.copy(royalties = royalty))
         } else {
-            pair
+            reduceData
         }
     }
 
@@ -161,28 +161,30 @@ class ItemReduceService(
         }
     }
 
-    private fun saveItem(marker: Marker, item: Item, ownerships: List<Ownership>): Mono<Item> {
-        logger.info(marker, "Saving Item $item\nowners: ${ownerships.map { it.owner }}")
+    private fun saveItem(context: ReduceContext, item: Item, ownerships: List<Ownership>): Mono<Item> {
+        logger.info(context.marker, "Saving Item $item\nowners: ${ownerships.map { it.owner }}")
         return itemRepository.save(item.copy(owners = ownerships.map { it.owner }))
             .flatMap { savedItem ->
-                eventListenerListener.onItemChanged(savedItem).thenReturn(savedItem)
+                eventListenerListener.onItemChanged(savedItem, context.lastEventId).thenReturn(savedItem)
             }
     }
 
-    private fun updateOwnershipAndSave(marker: Marker, item: Item, ownership: Ownership): Mono<Ownership> =
-        when {
+    private fun updateOwnershipAndSave(context: ReduceContext, item: Item, ownership: Ownership): Mono<Ownership> {
+        val marker = context.marker
+        val eventID = "${context.lastEventId}_${ownership.id}"
+        return when {
             ownership.value <= EthUInt256.of(0) && ownership.pending.isEmpty() -> {
                 ownershipService
                     .delete(marker, ownership)
-                    .then(eventListenerListener.onOwnershipDeleted(ownership.id))
+                    .then(eventListenerListener.onOwnershipDeleted(ownership.id, eventID))
                     .then(Mono.empty<Ownership>())
             }
             else -> {
-                buildOwnership(marker, ownership, item).let {
+                buildOwnership(context.marker, ownership, item).let {
                     ownershipService.save(marker, it)
                         .flatMap { saveResult ->
                             if (saveResult.wasSaved) {
-                                eventListenerListener.onOwnershipChanged(saveResult.ownership)
+                                eventListenerListener.onOwnershipChanged(saveResult.ownership, eventID)
                             } else {
                                 Mono.empty()
                             }.thenReturn(saveResult.ownership)
@@ -190,6 +192,7 @@ class ItemReduceService(
                 }
             }
         }
+    }
 
     private fun buildOwnership(marker: Marker, ownership: Ownership, item: Item): Ownership {
         logger.info(marker, "Build formed ownership: $ownership\nby item: $item")
@@ -338,22 +341,22 @@ class ItemReduceService(
         private fun Flux<HistoryLog>.reduce(
             context: ReduceContext,
             item: Item,
-            ownership: Ownership,
+            ownerships: Map<Address, Ownership>,
             itemReducer: (Item, HistoryLog) -> Item,
-            ownershipReducer: (Ownership, HistoryLog) -> Ownership
+            ownershipsReducer: (Map<Address, Ownership>, HistoryLog) -> Map<Address, Ownership>
         ): Mono<ReduceData> =
-            reduce(ReduceData(context, item, ownership)) { (context, item, ownership), historyLog ->
+            reduce(ReduceData(context, item, ownerships)) { (context, item, ownerships), historyLog ->
                 ReduceData(
                     context = context.withHistoryLog(historyLog),
                     item = itemReducer(item, historyLog),
-                    ownership = ownershipReducer(ownership, historyLog)
+                    ownerships = ownershipsReducer(ownerships, historyLog)
                 )
             }
 
         private data class ReduceData(
             val context: ReduceContext,
             val item: Item,
-            val ownerships: List<Ownership>
+            val ownerships: Map<Address, Ownership>
         )
 
         private data class ReduceContext(

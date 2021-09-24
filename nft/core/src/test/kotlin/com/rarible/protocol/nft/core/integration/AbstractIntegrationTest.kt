@@ -11,6 +11,7 @@ import com.rarible.ethereum.listener.log.domain.LogEvent
 import com.rarible.ethereum.listener.log.domain.LogEventStatus
 import com.rarible.protocol.dto.*
 import com.rarible.protocol.nft.core.configuration.NftIndexerProperties
+import com.rarible.protocol.nft.core.misc.eventId
 import com.rarible.protocol.nft.core.repository.TemporaryItemPropertiesRepository
 import com.rarible.protocol.nft.core.repository.TokenRepository
 import com.rarible.protocol.nft.core.repository.history.LazyNftItemHistoryRepository
@@ -80,8 +81,8 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
         itemEventConsumer = createItemEventConsumer()
     }
 
-    suspend fun <T> saveItemHistory(data: T, token: Address = AddressFactory.create(), transactionHash: Word = WordFactory.create(), logIndex: Int? = null, status: LogEventStatus = LogEventStatus.CONFIRMED): T {
-        return nftItemHistoryRepository.save(
+    suspend fun <T> saveItemHistory(data: T, token: Address = AddressFactory.create(), transactionHash: Word = WordFactory.create(), logIndex: Int? = null, status: LogEventStatus = LogEventStatus.CONFIRMED): Pair<String, T> {
+        val log = nftItemHistoryRepository.save(
             LogEvent(
                 data = data as EventData,
                 address = token,
@@ -92,7 +93,9 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
                 logIndex = logIndex,
                 blockNumber = 1,
                 minorLogIndex = 0)
-        ).awaitFirst().data as T
+        ).awaitFirst()
+
+        return log.eventId to log.data as T
     }
 
     private fun createOwnershipEventConsumer(): RaribleKafkaConsumer<NftOwnershipEventDto> {
@@ -120,6 +123,7 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
     }
 
     protected suspend fun checkItemEventWasPublished(
+        eventId: String,
         token: Address,
         tokenId: EthUInt256,
         itemMeta: NftItemMetaDto,
@@ -142,6 +146,7 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
                                 event.item.contract == token
                                         && event.item.tokenId == tokenId.value
                                         && event.item.meta == itemMeta
+                                        && event.eventId == eventId
                             }
                             is NftItemDeleteEventDto -> {
                                 event.item.token == token && event.item.tokenId == tokenId.value
@@ -156,12 +161,14 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
     }
 
     protected suspend fun checkOwnershipEventWasPublished(
+        eventId: String,
         token: Address,
         tokenId: EthUInt256,
         owner: Address,
         eventType: Class<out NftOwnershipEventDto>
     ) = coroutineScope {
         val events = Collections.synchronizedList(ArrayList<KafkaMessage<NftOwnershipEventDto>>())
+        val expectedEventId = "${eventId}_${com.rarible.protocol.nft.core.model.OwnershipId(token, tokenId, owner)}"
 
         val job = async {
             ownershipEventConsumer
@@ -177,12 +184,14 @@ abstract class AbstractIntegrationTest : BaseCoreTest() {
                             is NftOwnershipUpdateEventDto -> {
                                 event.ownership.contract == token &&
                                         event.ownership.tokenId == tokenId.value &&
-                                        event.ownership.owner == owner
+                                        event.ownership.owner == owner &&
+                                        event.eventId == expectedEventId
                             }
                             is NftOwnershipDeleteEventDto -> {
                                 event.ownership.token == token &&
                                         event.ownership.tokenId == tokenId.value &&
-                                        event.ownership.owner == owner
+                                        event.ownership.owner == owner &&
+                                        event.eventId == expectedEventId
                             }
                         }
                     }

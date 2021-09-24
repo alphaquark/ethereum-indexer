@@ -7,6 +7,7 @@ import com.rarible.ethereum.listener.log.domain.LogEventStatus
 import com.rarible.protocol.dto.*
 import com.rarible.protocol.nft.core.integration.AbstractIntegrationTest
 import com.rarible.protocol.nft.core.integration.IntegrationTest
+import com.rarible.protocol.nft.core.misc.eventId
 import com.rarible.protocol.nft.core.model.*
 import com.rarible.protocol.nft.core.repository.ownership.OwnershipRepository
 import io.daonomic.rpc.domain.WordFactory
@@ -53,7 +54,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = Address.ZERO(),
             value = EthUInt256.ONE
         )
-        saveItemHistory(transfer)
+        val (eventId, _) = saveItemHistory(transfer)
 
         historyService.update(token, tokenId).awaitFirstOrNull()
 
@@ -62,7 +63,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         assertThat(item.creators).isEqualTo(listOf(Part.fullPart(owner)))
         assertThat(item.supply).isEqualTo(EthUInt256.ONE)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
+        checkItemEventWasPublished(eventId, token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
     }
 
     @Test
@@ -88,7 +89,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = Address.ZERO(),
             value = EthUInt256.ONE
         )
-        saveItemHistory(transfer)
+        val (eventId, _) = saveItemHistory(transfer)
 
         historyService.update(token, tokenId).awaitFirstOrNull()
 
@@ -97,7 +98,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         assertThat(item.creators).isEqualTo(listOf(Part.fullPart(creator)))
         assertThat(item.supply).isEqualTo(EthUInt256.ONE)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
+        checkItemEventWasPublished(eventId, token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
     }
 
     @Test
@@ -110,7 +111,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             tokenId
         )
 
-        saveItemHistory(
+        val (pendingEventId, _) = saveItemHistory(
             ItemTransfer(
                 owner = owner,
                 token = token,
@@ -123,13 +124,13 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         historyService.update(token, tokenId).awaitFirstOrNull()
         checkItem(token = token, tokenId = tokenId, expSupply = EthUInt256.ZERO)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
-        checkOwnershipEventWasPublished(token, tokenId, owner, NftOwnershipUpdateEventDto::class.java)
+        checkItemEventWasPublished(pendingEventId, token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
+        checkOwnershipEventWasPublished(pendingEventId, token, tokenId, owner, NftOwnershipUpdateEventDto::class.java)
 
         val pendingMint = nftItemHistoryRepository.findAllItemsHistory().collectList().awaitFirst().single()
         nftItemHistoryRepository.remove(pendingMint.log).awaitFirst()
 
-        saveItemHistory(
+        val (eventId, _) = saveItemHistory(
             ItemTransfer(
                 owner = owner,
                 token = token,
@@ -143,8 +144,8 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         historyService.update(token, tokenId).then().block()
         checkItem(token = token, tokenId = tokenId, expSupply = EthUInt256.ONE)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
-        checkOwnershipEventWasPublished(token, tokenId, owner, NftOwnershipUpdateEventDto::class.java)
+        checkItemEventWasPublished(eventId, token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
+        checkOwnershipEventWasPublished(eventId, token, tokenId, owner, NftOwnershipUpdateEventDto::class.java)
     }
 
     @Test
@@ -165,8 +166,20 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = Address.ZERO(),
             value = EthUInt256.ONE
         )
-        nftItemHistoryRepository.save(LogEvent(data = transfer, address = AddressFactory.create(), topic = WordFactory.create(), transactionHash = WordFactory.create(), status = LogEventStatus.DROPPED, index = 0, minorLogIndex = 0)).awaitFirst()
+        val eventId = nftItemHistoryRepository.save(
+            LogEvent(
+                data = transfer,
+                address = AddressFactory.create(),
+                topic = WordFactory.create(),
+                transactionHash = WordFactory.create(),
+                status = LogEventStatus.DROPPED,
+                index = 0,
+                minorLogIndex = 0
+            )
+        ).awaitFirst().eventId
+
         val id = OwnershipId(token, tokenId, owner)
+
         ownershipRepository.save(
             Ownership(
                 token = token,
@@ -184,8 +197,8 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         assertThat(ownershipRepository.findById(id).awaitFirstOrNull()).isNull()
         checkItem(token = token, tokenId = tokenId, expSupply = EthUInt256.ZERO, deleted = true)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemDeleteEventDto::class.java)
-        checkOwnershipEventWasPublished(token, tokenId, owner, NftOwnershipDeleteEventDto::class.java)
+        checkItemEventWasPublished(eventId, token, tokenId, expectedItemMeta, NftItemDeleteEventDto::class.java)
+        checkOwnershipEventWasPublished(eventId, token, tokenId, owner, NftOwnershipDeleteEventDto::class.java)
     }
 
     @Test
@@ -283,7 +296,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = Address.ZERO(),
             value = EthUInt256.of(3)
         )
-        saveItemHistory(transfer)
+        saveItemHistory(transfer, logIndex = 1)
 
         val transfer2 = ItemTransfer(
             owner = Address.ZERO(),
@@ -293,15 +306,15 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = owner,
             value = EthUInt256.of(3)
         )
-        saveItemHistory(transfer2)
+        val (eventId, _) = saveItemHistory(transfer2, logIndex = 2)
 
         historyService.update(token, tokenId).then().block()
         val item = itemRepository.findById(ItemId(token, tokenId)).awaitFirst()
         assertThat(item.supply).isEqualTo(EthUInt256.ZERO)
         assertThat(item.deleted).isEqualTo(true)
 
-        checkItemEventWasPublished(token, tokenId, expectedItemMeta, NftItemDeleteEventDto::class.java)
-        checkOwnershipEventWasPublished(token, tokenId, owner, NftOwnershipDeleteEventDto::class.java)
+        checkItemEventWasPublished(eventId, token, tokenId, expectedItemMeta, NftItemDeleteEventDto::class.java)
+        checkOwnershipEventWasPublished(eventId, token, tokenId, owner, NftOwnershipDeleteEventDto::class.java)
     }
 
     @Test
@@ -431,7 +444,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
             from = Address.ZERO(),
             value = EthUInt256.TEN
         )
-        saveItemHistory(transfer, token)
+        saveItemHistory(transfer, token, logIndex = 1)
 
         historyService.update(token, tokenId).awaitFirstOrNull()
         checkItem(token, tokenId, EthUInt256.TEN)
@@ -440,7 +453,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         val buyer = AddressFactory.create()
 
         val transferAsBuying = ItemTransfer(buyer, token, tokenId, nowMillis(), owner, EthUInt256.Companion.of(2))
-        saveItemHistory(transferAsBuying, token)
+        val (eventId, _) = saveItemHistory(transferAsBuying, token, logIndex = 2)
 
         historyService.update(token, tokenId).awaitFirstOrNull()
 
@@ -448,7 +461,7 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
         checkOwnership(buyer, token, tokenId, expValue = EthUInt256.of(2), expLazyValue = EthUInt256.ZERO)
         checkOwnership(owner, token, tokenId, expValue = EthUInt256.of(8), expLazyValue = EthUInt256.ZERO)
 
-        checkOwnershipEventWasPublished(token, tokenId, buyer, NftOwnershipUpdateEventDto::class.java)
+        checkOwnershipEventWasPublished(eventId, token, tokenId, buyer, NftOwnershipUpdateEventDto::class.java)
     }
 
     @Test
@@ -775,6 +788,54 @@ internal class ItemReduceServiceIt : AbstractIntegrationTest() {
 
         val realItem = itemRepository.findById(ItemId(token, tokenId)).awaitFirst()
         assertThat(realItem.royalties).isEqualTo(realRoyalties)
+    }
+
+    @Test
+    fun `should get last log eventId from logs sequence`() = runBlocking {
+        val token = AddressFactory.create()
+        val tokenId = EthUInt256.ONE
+
+        saveTokenAndMeta(
+            Token(token, name = "TEST", standard = TokenStandard.ERC721),
+            tokenId
+        )
+
+        val (lastEventId, _) = saveItemHistory(
+            ItemTransfer(
+                owner = AddressFactory.create(),
+                token = token,
+                tokenId = tokenId,
+                date = nowMillis(),
+                from = AddressFactory.create(),
+                value = EthUInt256.ONE
+            ),
+            logIndex = 3
+        )
+        saveItemHistory(
+            ItemTransfer(
+                owner = AddressFactory.create(),
+                token = token,
+                tokenId = tokenId,
+                date = nowMillis(),
+                from = AddressFactory.create(),
+                value = EthUInt256.ONE
+            ),
+            logIndex = 2
+        )
+        saveItemHistory(
+            ItemTransfer(
+                owner = AddressFactory.create(),
+                token = token,
+                tokenId = tokenId,
+                date = nowMillis(),
+                from = AddressFactory.create(),
+                value = EthUInt256.ONE
+            ),
+            logIndex = 1
+        )
+
+        historyService.update(token, tokenId).awaitFirstOrNull()
+        checkItemEventWasPublished(lastEventId, token, tokenId, expectedItemMeta, NftItemUpdateEventDto::class.java)
     }
 
     private val itemProperties = ItemProperties(

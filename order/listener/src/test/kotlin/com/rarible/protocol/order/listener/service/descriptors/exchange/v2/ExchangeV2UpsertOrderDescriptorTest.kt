@@ -114,6 +114,8 @@ class ExchangeV2UpsertOrderDescriptorTest : AbstractExchangeV2Test() {
                 onChainOrderKey = null,
                 makePriceUsd = null,
                 takePriceUsd = null,
+                makePrice = null,
+                takePrice = null,
                 makeUsd = null,
                 takeUsd = null
             )
